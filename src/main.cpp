@@ -1,6 +1,7 @@
 #include <Arduino.h>
 #include <Adafruit_PWMServoDriver.h>
 #include <Adafruit_NeoPixel.h>
+#include <Arduino_BMI270_BMM150.h>
 
 /**
  * 
@@ -61,14 +62,63 @@ void run_neopixel(){
   // Move the rainbow pattern
   rainbow_offset += 256; // Adjust speed by changing this value
 }
+// IMU data structure
+struct IMUData {
+  float accel_x, accel_y, accel_z;
+  float gyro_x, gyro_y, gyro_z;
+  float mag_x, mag_y, mag_z;
+  bool accel_valid, gyro_valid, mag_valid;
+};
+
+// Global IMU data buffer
+IMUData imu_data = {0};
+
+void read_imu() {
+  // Read accelerometer data
+  if (IMU.accelerationAvailable()) {
+    IMU.readAcceleration(imu_data.accel_x, imu_data.accel_y, imu_data.accel_z);
+    imu_data.accel_valid = true;
+  } else {
+    imu_data.accel_valid = false;
+  }
+  
+  // Read gyroscope data
+  if (IMU.gyroscopeAvailable()) {
+    IMU.readGyroscope(imu_data.gyro_x, imu_data.gyro_y, imu_data.gyro_z);
+    imu_data.gyro_valid = true;
+  } else {
+    imu_data.gyro_valid = false;
+  }
+  
+  // Read magnetometer data
+  if (IMU.magneticFieldAvailable()) {
+    IMU.readMagneticField(imu_data.mag_x, imu_data.mag_y, imu_data.mag_z);
+    imu_data.mag_valid = true;
+  } else {
+    imu_data.mag_valid = false;
+  }
+}
+
 
 static unsigned long lastBlinkTime = 0;
 static bool ledState = false;
 
 void setup() {
+  Serial.begin(9600);  // Add this line to initialize Serial
+  
   pinMode(LED_BUILTIN, OUTPUT);
 
-  // // Initialize PCA9685
+  // Initialize IMU
+  bool have_imu = false;
+  while (!have_imu){
+    have_imu = IMU.begin();
+    if (!have_imu){
+      Serial.println("Failed to initialize IMU!");
+      delay(100);
+    }
+  }
+
+  // Initialize PCA9685
   pwm.begin();
   pwm.setOscillatorFrequency(27000000);  // The int.osc. is closer to 27MHz
   pwm.setPWMFreq(PWM_FREQ);  // Servo frequency is typically 50Hz
@@ -83,6 +133,8 @@ void setup() {
   strip.setBrightness(50); // Set brightness to 50% (adjust as needed)  
 }
 
+static unsigned long lastLoopTime = 0;
+static float loopRate = 0.0;
 
 void loop() {
   // Update servos
@@ -91,16 +143,37 @@ void loop() {
   // Update NeoPixel rainbow
   run_neopixel();
   
+  // Read and print IMU data
+  read_imu();
+  
   // Small delay to control animation speed
   delay(20);
 
   // Read battery voltage
+  // Calculate loop rate
+  unsigned long currentTime = millis();
+  if (lastLoopTime != 0) {
+    float deltaTime = (currentTime - lastLoopTime) / 1000.0; // Convert to seconds
+    loopRate = 1.0 / deltaTime; // Calculate frequency in Hz
+  }
+  lastLoopTime = currentTime;
+
   int rawValue = analogRead(A7);
   // Convert to voltage (assuming 3.3V reference and 4.7k+4.7k voltage divider)
   float voltage = (rawValue / 1023.0) * 3.3 * 2.0;  // *2 for voltage divider
-  Serial.print("Battery voltage: ");
-  Serial.print(voltage);
-  Serial.println("V");
+  
+  // Print battery voltage, IMU gyro values, and loop rate in one line with fixed precision
+  Serial.print("Batt: ");
+  Serial.print(voltage, 2);
+  Serial.print("V | Gyro X: ");
+  Serial.print(imu_data.gyro_x, 2);
+  Serial.print(" Y: ");
+  Serial.print(imu_data.gyro_y, 2);
+  Serial.print(" Z: ");
+  Serial.print(imu_data.gyro_z, 2);
+  Serial.print(" | Loop: ");
+  Serial.print(loopRate, 1);
+  Serial.println(" Hz");
 
   // Blink onboard LED at 500ms intervals
   if (millis() - lastBlinkTime >= 500) {
@@ -109,4 +182,3 @@ void loop() {
     lastBlinkTime = millis();
   }
 }
-

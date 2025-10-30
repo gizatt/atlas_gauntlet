@@ -14,7 +14,7 @@
 
 const int PCA9685_OE_PIN = 20; // Output Enable pin for PCA9685
 const int NEOPIXEL_PIN = 2;    // NeoPixel data pin
-const int NEOPIXEL_COUNT = 30; // Number of pixels in strip (adjust as needed)
+const int NEOPIXEL_COUNT = 44; // Number of pixels in strip (adjust as needed)
 
 // Create PCA9685 object
 Adafruit_PWMServoDriver pwm = Adafruit_PWMServoDriver();
@@ -45,8 +45,8 @@ ServoConfig servo_configs[] = {
     {0, 2000, 1250, 2000},
     {1, 1500, 2250, 1500},
     {2, 1500, 2000, 1500},
-    {4, 1500, 1800, 1500}, // right flap
-    {5, 1500, 1200, 1500}, // left flap
+    {4, 1900, 1700, 1900}, // right flap
+    {5, 1200, 1400, 1200}, // left flap
 };
 
 // Rainbow variables
@@ -86,23 +86,28 @@ void run_servos() {
   // }
 }
 
+// Subtle neon-blue breath across the whole strip
+// Tweak lfo_hz (speed) and pulse_depth (range) to taste.
 void run_neopixel() {
-  // push a rainbow pattern up the neopixel strip
-  for (int i = 0; i < strip.numPixels(); i++) {
-    // Calculate hue for this pixel (0-65536 range)
-    uint16_t hue = (i * 65536L / strip.numPixels()) + rainbow_offset;
+  // --- Tunables ---
+  const float   lfo_hz       = 0.6f;  // pulse speed (Hz)
+  const uint8_t base_value   = 220;   // base brightness (0–255)
+  const uint8_t pulse_depth  = 25;    // how much it swells (0–255)
+  const uint16_t hue_blue    = 31800; // ~175° on HSV wheel (cyan-blue)
+  const uint8_t saturation   = 100;
 
-    // Convert HSV to RGB and set pixel color
-    uint32_t color = strip.gamma32(strip.ColorHSV(hue));
-    strip.setPixelColor(i, color);
-  }
+  // LFO: 0..1 sine
+  float t    = millis() * 0.001f;                 // seconds
+  float s    = 0.5f * (1.0f + sinf(TWO_PI * lfo_hz * t));  // 0..1
+  int   val  = base_value + (int)(pulse_depth * s);
+  val        = constrain(val, 0, 255);
 
-  // Show the colors
+  // One color for all pixels (fast)
+  uint32_t c = strip.gamma32(strip.ColorHSV(hue_blue, saturation, (uint8_t)val));
+  strip.fill(c, 0, strip.numPixels());
   strip.show();
-
-  // Move the rainbow pattern
-  rainbow_offset += 256; // Adjust speed by changing this value
 }
+
 // IMU data structure
 struct IMUData {
   float accel_x, accel_y, accel_z;

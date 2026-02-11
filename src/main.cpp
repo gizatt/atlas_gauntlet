@@ -45,19 +45,23 @@ struct ServoConfig {
   int closed_us; // Pulse width in microseconds for closed position
   int open_us;   // Pulse width in microseconds for open position
   int us_now; // Current state, for blending purposes
+  int us_target; // Current target
+  float start_opening_phase; // At what phase value this servo start to transition from closed to open
+  float end_opening_phase; // At what phase value this servo finishes transitioning from closed to open
 };
 // Servo configurations array
 ServoConfig servo_configs[] = {
-    {0, 2000, 1250, 2000},
-    {1, 1500, 2250, 1500},
-    {2, 1500, 2000, 1500},
-    {4, 1900, 1700, 1900}, // right flap
-    {5, 1200, 1400, 1200}, // left flap
-    {8, 800, 2250, 1500}, // power meter, centered when closed
+    {0, 2000, 1250, 2000, 2000, 0.1, 0.2}, // Front left flap
+    {1, 1500, 2250, 1500, 1500, 0.1, 0.2}, // Front right flap
+    {2, 1500, 2000, 1500, 1500, 0.45, 0.55}, // Middle wrist flap
+    {4, 1900, 1750, 1900, 1900, 0.8, 0.9}, // Back right flap
+    {5, 1200, 1350, 1200, 1200, 0.8, 0.9}, // Back left flap
+    {8, 800, 2250, 1500, 1500, 0.1, 0.9}, // Power / gas gauge
 };
 
 // Rainbow variables
 uint16_t rainbow_offset = 0;
+
 
 void write_servo(int servo, int servo_target_us) {
   // Convert microseconds to PWM value
@@ -91,23 +95,49 @@ bool get_debounced_servo_toggle_pin() {
 }
 
 
+float flap_opening_phase = 0.0;
+const float PHASE_RAMP_UP_TIME_S = 0.75;
+const float PHASE_RAMP_DOWN_TIME_S = 0.5;
 
+void update_servo_targets(double dt) {
+  // Updates servo targets based on the button state.
+  // Currently, toggling the button state drives an accumulator which ramps a "phase"
+  // value from 0 to 1 over a fixed period. As the phase ramps up, sets of servos
+  // open in sequence.
 
-void run_servos() {
-  bool servo_state = get_debounced_servo_toggle_pin();
+  bool toggle_state = get_debounced_servo_toggle_pin();
+  if (toggle_state){
+    flap_opening_phase += dt / PHASE_RAMP_UP_TIME_S;
+    flap_opening_phase = min(1.0, flap_opening_phase);
+  } else {
+    flap_opening_phase -= dt / PHASE_RAMP_DOWN_TIME_S;
+    flap_opening_phase = max(0.0, flap_opening_phase);
+  }
   
   for (auto &servo_config : servo_configs) {
-    int target_us = servo_state ? servo_config.open_us : servo_config.closed_us;
+    float open_amount = (flap_opening_phase - servo_config.start_opening_phase) / (servo_config.end_opening_phase - servo_config.start_opening_phase);
+    open_amount = min(1.0, max(0.0, open_amount));
+    servo_config.us_target = open_amount * servo_config.open_us + (1.0 - open_amount) * servo_config.closed_us;
+  }
+}
+
+const float SERVO_SLEW_RATE_US_PER_S = 8000;
+
+void run_servos(double dt) {
+  // Drives servos towards their target at a max speed and commits the updated servo commands.
+  const int max_step_us = dt * SERVO_SLEW_RATE_US_PER_S;
+  for (auto &servo_config : servo_configs) {
     // blend us_now to the target us by a fixed step (up to fixed step per tick)
-    int step = min(abs(target_us - servo_config.us_now), 100);
-    if (target_us > servo_config.us_now) {
+    int step = min(abs(servo_config.us_target - servo_config.us_now), max_step_us);
+    if (servo_config.us_target > servo_config.us_now) {
       servo_config.us_now += step;
-    } else if (target_us < servo_config.us_now) {
+    } else if (servo_config.us_target < servo_config.us_now) {
       servo_config.us_now -= step;
     }
     write_servo(servo_config.pin, servo_config.us_now);
   }
 
+  // Unused old dev utility for installing servos
   // // For servos on range 8 to 12, set the servo to 1500
   // for (int i = 8; i < 12; i++) {
   //   write_servo(i, 1500);
@@ -213,12 +243,17 @@ void setup() {
   strip.setBrightness(50); // Set brightness to 50% (adjust as needed)
 }
 
-static unsigned long lastLoopTime = 0;
-static float loopRate = 0.0;
+static unsigned long last_loop_t_ms = 0;
 
 void loop() {
+  // Calculate loop rate
+  unsigned long t_ms = millis();
+  double dt = (t_ms - last_loop_t_ms) / 1000.0; // Convert to seconds
+  last_loop_t_ms = t_ms;
+
   // Update servos
-  run_servos();
+  update_servo_targets(dt);
+  run_servos(dt);
 
   // Update NeoPixel rainbow
   run_neopixel();
@@ -230,14 +265,6 @@ void loop() {
   delay(20);
 
   // Read battery voltage
-  // Calculate loop rate
-  unsigned long currentTime = millis();
-  if (lastLoopTime != 0) {
-    float deltaTime =
-        (currentTime - lastLoopTime) / 1000.0; // Convert to seconds
-    loopRate = 1.0 / deltaTime;                // Calculate frequency in Hz
-  }
-  lastLoopTime = currentTime;
 
   int rawValue = analogRead(A7);
   // Convert to voltage (assuming 3.3V reference and 4.7k+4.7k voltage divider)
@@ -253,9 +280,10 @@ void loop() {
   Serial.print(imu_data.gyro_y, 2);
   Serial.print(" Z: ");
   Serial.print(imu_data.gyro_z, 2);
-  Serial.print(" | Loop: ");
-  Serial.print(loopRate, 1);
-  Serial.println(" Hz");
+  Serial.print(" | Phase: ");
+  Serial.print(flap_opening_phase);
+  Serial.print(" | dt: ");
+  Serial.println(dt);
 
   // Blink onboard LED at 500ms intervals
   if (millis() - lastBlinkTime >= 500) {

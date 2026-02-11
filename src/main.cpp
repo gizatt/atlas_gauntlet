@@ -14,7 +14,7 @@
 
 const int PCA9685_OE_PIN = 20; // Output Enable pin for PCA9685
 const int NEOPIXEL_PIN = 2;    // NeoPixel data pin
-const int NEOPIXEL_COUNT = 44; // Number of pixels in strip (adjust as needed)
+const int NEOPIXEL_COUNT = 63; // Number of pixels in strip (adjust as needed)
 
 // Create PCA9685 object
 Adafruit_PWMServoDriver pwm = Adafruit_PWMServoDriver();
@@ -32,6 +32,12 @@ const float PWM_PERIOD_US = 1E6 / PWM_FREQ;
 // flip this to open/close flaps
 const int SERVO_TOGGLE_PIN = D3;
 
+// Debouncing variables for servo toggle pin
+static bool last_servo_toggle_state = false;
+static bool debounced_servo_toggle_state = false;
+static unsigned long last_toggle_debounce_time = 0;
+const unsigned long DEBOUNCE_DELAY = 50; // 50ms debounce delay
+
 // define a struct with a servo pin (on the 9865), a "closed" us value, and an
 // "open" us value.
 struct ServoConfig {
@@ -47,6 +53,7 @@ ServoConfig servo_configs[] = {
     {2, 1500, 2000, 1500},
     {4, 1900, 1700, 1900}, // right flap
     {5, 1200, 1400, 1200}, // left flap
+    {8, 800, 2250, 1500}, // power meter, centered when closed
 };
 
 // Rainbow variables
@@ -60,8 +67,35 @@ void write_servo(int servo, int servo_target_us) {
   pwm.setPWM(servo, 0, pulseWidth);
 }
 
+bool get_debounced_servo_toggle_pin() {
+  // Read the current pin state
+  bool current_toggle_state = digitalRead(SERVO_TOGGLE_PIN);
+  
+  // Check if the reading has changed
+  if (current_toggle_state != last_servo_toggle_state) {
+    // Reset the debouncing timer
+    last_toggle_debounce_time = millis();
+  }
+  
+  // If enough time has passed, accept the new reading
+  if ((millis() - last_toggle_debounce_time) > DEBOUNCE_DELAY) {
+    if (current_toggle_state != debounced_servo_toggle_state) {
+      debounced_servo_toggle_state = current_toggle_state;
+    }
+  }
+  
+  // Save the current reading for next iteration
+  last_servo_toggle_state = current_toggle_state;
+  
+  return debounced_servo_toggle_state;
+}
+
+
+
+
 void run_servos() {
-  int servo_state = digitalRead(SERVO_TOGGLE_PIN);
+  bool servo_state = get_debounced_servo_toggle_pin();
+  
   for (auto &servo_config : servo_configs) {
     int target_us = servo_state ? servo_config.open_us : servo_config.closed_us;
     // blend us_now to the target us by a fixed step (up to fixed step per tick)
@@ -74,10 +108,10 @@ void run_servos() {
     write_servo(servo_config.pin, servo_config.us_now);
   }
 
-  // For servos on range 8 to 12, set the servo to 1500
-  for (int i = 8; i < 12; i++) {
-    write_servo(i, 1500);
-  }
+  // // For servos on range 8 to 12, set the servo to 1500
+  // for (int i = 8; i < 12; i++) {
+  //   write_servo(i, 1500);
+  // }
 
   // // For servos range 12 to 16, set servo to a sin wave from 1000 to 2000
   // for (int i = 12; i < 16; i++) {
@@ -152,7 +186,7 @@ void setup() {
   Serial.begin(9600); // Add this line to initialize Serial
 
   pinMode(LED_BUILTIN, OUTPUT);
-  pinMode(SERVO_TOGGLE_PIN, INPUT);
+  pinMode(SERVO_TOGGLE_PIN, INPUT_PULLUP);
 
   // Initialize IMU
   bool have_imu = false;
@@ -207,7 +241,7 @@ void loop() {
 
   int rawValue = analogRead(A7);
   // Convert to voltage (assuming 3.3V reference and 4.7k+4.7k voltage divider)
-  float voltage = (rawValue / 1023.0) * 3.3 * 2.0; // *2 for voltage divider
+  float voltage = (rawValue / 4095.0) * 3.3 * 2.0; // *2 for voltage divider
 
   // Print battery voltage, IMU gyro values, and loop rate in one line with
   // fixed precision

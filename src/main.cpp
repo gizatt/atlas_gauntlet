@@ -151,20 +151,27 @@ void run_servos(double dt) {
 }
 
 // Subtle neon-blue breath across the whole strip
-// Tweak lfo_hz (speed) and pulse_depth (range) to taste.
 void run_neopixel() {
   // --- Tunables ---
   const float   lfo_hz       = 0.6f;  // pulse speed (Hz)
-  const uint8_t base_value   = 220;   // base brightness (0–255)
+  const float flicker_hz = 10.0f;
+  const uint8_t base_value   = 220 + flap_opening_phase * 20;   // base brightness (0–255)
   const uint8_t pulse_depth  = 25;    // how much it swells (0–255)
-  const uint16_t hue_blue    = 31800; // ~175° on HSV wheel (cyan-blue)
+  const uint16_t hue_blue    = 31800 + flap_opening_phase * 1000; // ~175° on HSV wheel (cyan-blue)
   const uint8_t saturation   = 100;
 
   // LFO: 0..1 sine
   float t    = millis() * 0.001f;                 // seconds
-  float s    = 0.5f * (1.0f + sinf(TWO_PI * lfo_hz * t));  // 0..1
-  int   val  = base_value + (int)(pulse_depth * s);
-  val        = constrain(val, 0, 255);
+  float s1 = sinf(TWO_PI * lfo_hz * t);
+  float s2 = sinf(TWO_PI * sqrtf(2) * lfo_hz * t);
+  float s_base = s1*0.5 + s2 * 0.5; // kinda aperiod-looking sin
+  int val  = base_value + (int)(pulse_depth * s_base);
+  
+  // As phase ramps up, ramp in a negative signal that'll cause a flicker
+  float s_flicker = sinf(TWO_PI * flicker_hz * t);
+  float flicker_magnitude = (s_flicker * s_flicker) * s_base * flap_opening_phase;
+  val -= flicker_magnitude * 100;
+  val = constrain(val, 0, 255);
 
   // One color for all pixels (fast)
   uint32_t c = strip.gamma32(strip.ColorHSV(hue_blue, saturation, (uint8_t)val));

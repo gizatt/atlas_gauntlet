@@ -94,19 +94,40 @@ bool get_debounced_servo_toggle_pin() {
   return debounced_servo_toggle_state;
 }
 
-
 float flap_opening_phase = 0.0;
 const float PHASE_RAMP_UP_TIME_S = 0.75;
 const float PHASE_RAMP_DOWN_TIME_S = 0.5;
 
+// Motion control tunable parameters
+const float MOTION_TRIGGER_GYRO_THRESH = 250.0;
+const float MOTION_TRIGGER_WINDOW_S = 1.0;           // Time window for gyro flip detection (gyro_y: +GYRO_THRESH to -GYRO_THRESH)
+const float MOTION_TRIGGER_DELAY_S = 0.0;            // Delay after motion settles before triggering button press
+const float MOTION_TRIGGER_DURATION_S = 2.0;         // How long the motion trigger simulates button press
+
+// Motion control state variables
+static unsigned long last_gyro_positive_time_ms = 0; // Last time gyro_y was > MOTION_TRIGGER_GYRO_THRESH
+static unsigned long motion_flip_detected_time_ms = 0; // When flip was detected (gyro_y < -MOTION_TRIGGER_GYRO_THRESH)
+static unsigned long motion_settled_time_ms = 0;     // When motion settled back (gyro_y > -MOTION_TRIGGER_GYRO_THRESH)
+static unsigned long motion_trigger_time_ms = 0;     // When motion trigger activates
+static float gyro_y_min = 0.0;                       // Minimum gyro_y value seen
+static float gyro_y_max = 0.0;                       // Maximum gyro_y value seen
+
 void update_servo_targets(double dt) {
-  // Updates servo targets based on the button state.
+  // Updates servo targets based on the button state or motion trigger.
   // Currently, toggling the button state drives an accumulator which ramps a "phase"
   // value from 0 to 1 over a fixed period. As the phase ramps up, sets of servos
   // open in sequence.
+  // Motion trigger: if detected, simulates a 2-second button press.
 
   bool toggle_state = get_debounced_servo_toggle_pin();
-  if (toggle_state){
+  
+  // Check if motion trigger is active (within the duration window)
+  unsigned long current_time_ms = millis();
+  unsigned long time_since_motion_ms = current_time_ms - motion_trigger_time_ms;
+  bool motion_active = (time_since_motion_ms < (MOTION_TRIGGER_DURATION_S * 1000));
+  
+  // Treat motion trigger as equivalent to button press
+  if (toggle_state || motion_active){
     flap_opening_phase += dt / PHASE_RAMP_UP_TIME_S;
     flap_opening_phase = min(1.0, flap_opening_phase);
   } else {
@@ -190,6 +211,67 @@ struct IMUData {
 // Global IMU data buffer
 IMUData imu_data = {0};
 
+void update_motion_controls() {
+  // Check for a quick flipping motion: gyro_y going from >+MOTION_TRIGGER_GYRO_THRESH to <-MOTION_TRIGGER_GYRO_THRESH within 1 second,
+  // then settling back, with a delay before triggering.
+  if (!imu_data.gyro_valid) {
+    return;
+  }
+  
+  unsigned long current_time_ms = millis();
+  
+  // Track min/max gyro_y values
+  if (imu_data.gyro_y < gyro_y_min) {
+    gyro_y_min = imu_data.gyro_y;
+  }
+  if (imu_data.gyro_y > gyro_y_max) {
+    gyro_y_max = imu_data.gyro_y;
+  }
+  
+  // Track when gyro_y is positive and above threshold
+  if (imu_data.gyro_y > MOTION_TRIGGER_GYRO_THRESH) {
+    last_gyro_positive_time_ms = current_time_ms;
+    // Reset flip detection if we're back to positive
+    motion_flip_detected_time_ms = 0;
+    motion_settled_time_ms = 0;
+  }
+  
+  // Check if gyro_y is now negative below threshold (flip detected)
+  if (imu_data.gyro_y < -MOTION_TRIGGER_GYRO_THRESH && motion_flip_detected_time_ms == 0) {
+    // Check if we were positive recently (within the time window)
+    unsigned long time_since_positive_ms = current_time_ms - last_gyro_positive_time_ms;
+    if (time_since_positive_ms < (MOTION_TRIGGER_WINDOW_S * 1000)) {
+      // Flip detected! Record the time but don't trigger yet
+      motion_flip_detected_time_ms = current_time_ms;
+      Serial.println("*** Flip detected, waiting for settle... ***");
+    }
+  }
+  
+  // After flip, wait for motion to settle (gyro_y comes back above -MOTION_TRIGGER_GYRO_THRESH)
+  if (motion_flip_detected_time_ms > 0 && motion_settled_time_ms == 0) {
+    if (imu_data.gyro_y > -MOTION_TRIGGER_GYRO_THRESH) {
+      // Motion has settled
+      motion_settled_time_ms = current_time_ms;
+      Serial.println("*** Motion settled, starting delay... ***");
+    }
+  }
+  
+  // After settling, wait for the delay period before activating trigger
+  if (motion_settled_time_ms > 0) {
+    unsigned long time_since_settled_ms = current_time_ms - motion_settled_time_ms;
+    if (time_since_settled_ms >= (MOTION_TRIGGER_DELAY_S * 1000)) {
+      // Only trigger once
+      if (motion_trigger_time_ms == 0 || (current_time_ms - motion_trigger_time_ms) > (MOTION_TRIGGER_DURATION_S * 1000)) {
+        motion_trigger_time_ms = current_time_ms;
+        Serial.println("*** Motion trigger activated! ***");
+      }
+      // Reset state for next detection
+      motion_flip_detected_time_ms = 0;
+      motion_settled_time_ms = 0;
+    }
+  }
+}
+
 void read_imu() {
   // Read accelerometer data
   if (IMU.accelerationAvailable()) {
@@ -258,15 +340,16 @@ void loop() {
   double dt = (t_ms - last_loop_t_ms) / 1000.0; // Convert to seconds
   last_loop_t_ms = t_ms;
 
+  // Read and process IMU data for motion controls
+  read_imu();
+  update_motion_controls();
+
   // Update servos
   update_servo_targets(dt);
   run_servos(dt);
 
   // Update NeoPixel rainbow
   run_neopixel();
-
-  // Read and print IMU data
-  read_imu();
 
   // Small delay to control animation speed
   delay(20);
@@ -287,6 +370,10 @@ void loop() {
   Serial.print(imu_data.gyro_y, 2);
   Serial.print(" Z: ");
   Serial.print(imu_data.gyro_z, 2);
+  Serial.print(" | Gyro Y min/max: ");
+  Serial.print(gyro_y_min, 2);
+  Serial.print("/");
+  Serial.print(gyro_y_max, 2);
   Serial.print(" | Phase: ");
   Serial.print(flap_opening_phase);
   Serial.print(" | dt: ");
